@@ -1,0 +1,167 @@
+# Telecom Customer Churn Analysis
+
+# Load required libraries
+library(tidyverse)
+library(caret)
+library(pROC)
+library(scales)
+library(reshape2)
+
+# Read the dataset
+data <- read.csv("D:/Programing in Business/Telco Customer data.csv")
+
+# Data Preprocessing
+# Convert Churn to binary numeric
+data$Churn <- ifelse(data$Churn == "Yes", 1, 0)
+
+# Convert TotalCharges to numeric
+data$TotalCharges <- as.numeric(as.character(data$TotalCharges))
+data$TotalCharges[is.na(data$TotalCharges)] <- median(data$TotalCharges, na.rm = TRUE)
+
+# Drop customerID column
+data <- data %>% select(-customerID)
+
+# Convert categorical variables to factors
+categorical_cols <- c('gender', 'Partner', 'Dependents', 'PhoneService', 
+                      'MultipleLines', 'InternetService', 'OnlineSecurity', 
+                      'OnlineBackup', 'DeviceProtection', 'TechSupport', 
+                      'StreamingTV', 'StreamingMovies', 'Contract', 
+                      'PaperlessBilling', 'PaymentMethod')
+
+data <- data %>%
+  mutate(across(all_of(categorical_cols), as.factor))
+
+# Prepare data for modeling
+# One-hot encode categorical variables
+data_encoded <- model.matrix(~ . - 1, data = data)
+data_encoded <- as.data.frame(data_encoded)
+
+# Separate features and target
+x <- data_encoded %>% select(-starts_with("Churn"))
+y <- data_encoded$Churn
+
+# Split data into training and testing sets
+set.seed(42)
+train_index <- createDataPartition(y, p = 0.8, list = FALSE)
+x_train <- x[train_index, ]
+x_test <- x[-train_index, ]
+y_train <- y[train_index]
+y_test <- y[-train_index]
+
+# Scale numerical features
+preprocess_object <- preProcess(x_train, method = c("center", "scale"))
+x_train_scaled <- predict(preprocess_object, x_train)
+x_test_scaled <- predict(preprocess_object, x_test)
+
+# Combine scaled features with target for modeling
+train_data <- cbind(x_train_scaled, Churn = y_train)
+test_data <- cbind(x_test_scaled, Churn = y_test)
+
+# Train Logistic Regression
+logreg_model <- glm(Churn ~ ., data = as.data.frame(train_data), 
+                    family = binomial())
+
+# Predictions
+y_pred_proba <- predict(logreg_model, 
+                        newdata = as.data.frame(x_test_scaled), 
+                        type = "response")
+y_pred <- ifelse(y_pred_proba > 0.5, 1, 0)
+
+# Create a graphics window to hold multiple plots
+par(mfrow = c(2, 2))
+
+# 1. ROC Curve
+roc_curve <- roc(y_test, y_pred_proba)
+plot(roc_curve, main = "ROC Curve")
+cat(sprintf("ROC-AUC Score: %.2f\n", auc(roc_curve)))
+
+# 2. Feature Importance Plot
+coefficients <- data.frame(
+  Feature = names(coef(logreg_model))[-1],
+  Coefficient = coef(logreg_model)[-1]
+)
+coefficients$Impact <- ifelse(coefficients$Coefficient > 0, "Positive", "Negative")
+coefficients <- coefficients[order(-abs(coefficients$Coefficient)), ]
+
+feature_importance_plot <- ggplot(coefficients, aes(x = Coefficient, y = reorder(Feature, Coefficient), fill = Impact)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Feature Importance (Logistic Regression)",
+       x = "Coefficient Value",
+       y = "Feature") +
+  theme_minimal()
+print(feature_importance_plot)
+
+# 3. Numerical Columns Histograms
+numerical_columns <- c("tenure", "MonthlyCharges", "TotalCharges")
+for (col in numerical_columns) {
+  p <- ggplot(data, aes_string(x = col)) +
+    geom_histogram(bins = 30, fill = "pink", color = "black", alpha = 0.8) +
+    labs(title = paste("Histogram of", col),
+         x = col,
+         y = "Frequency") +
+    theme_minimal()
+  print(p)
+}
+
+# 4. Categorical Columns Bar Plot
+categorical_columns <- c("Contract", "InternetService")
+for (col in categorical_columns) {
+  p <- ggplot(data, aes_string(x = col, fill = "factor(Churn)")) +
+    geom_bar(position = "dodge") +
+    labs(title = paste("Bar Plot of", col, "by Churn"),
+         x = col,
+         y = "Count") +
+    scale_fill_manual(values = c("blue", "red"), labels = c("No", "Yes")) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  print(p)
+}
+
+# 5. Scatter Plot
+scatter_plot <- ggplot(data, aes(x = tenure, y = TotalCharges, color = factor(Churn))) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("blue", "red"), labels = c("No", "Yes")) +
+  labs(title = "Tenure vs. Total Charges by Churn",
+       x = "Tenure (Months)",
+       y = "Total Charges ($)",
+       color = "Churn") +
+  theme_minimal()
+print(scatter_plot)
+
+# 6. Correlation Heatmap
+# One-hot encode for correlation
+data_encoded <- model.matrix(~ . - 1, data = data)
+corr_matrix <- cor(data_encoded)
+corr_matrix_melted <- melt(corr_matrix)
+
+correlation_heatmap <- ggplot(corr_matrix_melted, aes(Var1, Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1, 1), space = "Lab") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Correlation Heatmap")
+print(correlation_heatmap)
+
+# Model Evaluation
+accuracy <- mean(y_pred == y_test)
+cat(sprintf("Accuracy: %.2f\n", accuracy))
+
+# Confusion Matrix
+conf_matrix <- table(Actual = y_test, Predicted = y_pred)
+print("Confusion Matrix:")
+print(conf_matrix)
+
+# Churn Analysis
+total_customers <- nrow(data)
+churned_customers <- sum(data$Churn)
+churn_rate <- churned_customers / total_customers
+arpu <- mean(data$MonthlyCharges)
+revenue_loss <- churn_rate * total_customers * arpu
+
+cat(sprintf("Churn Rate: %.2f%%\n", churn_rate * 100))
+cat(sprintf("Average Revenue Per User (ARPU): $%.2f\n", arpu))
+cat(sprintf("Revenue Loss due to churn: $%.2f\n", revenue_loss))
+
+# Print top features
+print("Top 10 Features Driving Churn:")
+print(head(coefficients, 10))
