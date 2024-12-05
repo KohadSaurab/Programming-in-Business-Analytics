@@ -1,0 +1,131 @@
+# Load required libraries
+library(tidyverse)
+library(caret)
+library(ROSE)
+library(lightgbm)
+library(pROC)
+library(gridExtra)
+
+# Read dataset
+data <- read.csv("D:/Programing in Business/Telco Customer data.csv", stringsAsFactors = FALSE)
+
+# Preprocessing
+# Convert categorical variables to factors
+categorical_cols <- sapply(data, is.character)
+data[categorical_cols] <- lapply(data[categorical_cols], as.factor)
+
+# Encode target variable
+data$Churn <- ifelse(data$Churn == "Yes", 1, 0)
+
+# One-hot encode categorical variables
+data_encoded <- data %>%
+  mutate(across(where(is.factor), ~ as.numeric(.) - 1))
+
+# Replace missing values
+data_encoded <- data_encoded %>%
+  mutate(across(where(is.numeric), ~ replace_na(., mean(., na.rm = TRUE))))
+
+# Separate features and target
+X <- data_encoded %>% select(-Churn)
+y <- data_encoded$Churn
+
+# Scale features
+X_scaled <- scale(X)
+
+# Handle class imbalance with ROSE
+set.seed(42)
+balanced_data <- ovun.sample(as.factor(y) ~ ., 
+                             data = data.frame(X_scaled, y), 
+                             method = "both", 
+                             p = 0.5, 
+                             seed = 42)
+
+# Separate balanced features and target
+X_resampled <- balanced_data$data %>% select(-y)
+y_resampled <- balanced_data$data$y
+
+# Train-Test split
+train_indices <- createDataPartition(y_resampled, p = 0.8, list = FALSE)
+X_train <- X_resampled[train_indices, ]
+X_test <- X_resampled[-train_indices, ]
+y_train <- y_resampled[train_indices]
+y_test <- y_resampled[-train_indices]
+
+# Prepare LightGBM datasets
+lgb_train <- lgb.Dataset(as.matrix(X_train), label = y_train)
+lgb_test <- lgb.Dataset.create.valid(lgb_train, as.matrix(X_test), label = y_test)
+
+# LightGBM Model Parameters
+params <- list(
+  objective = "binary",
+  metric = "binary_logloss",
+  num_leaves = 31,
+  learning_rate = 0.1,
+  feature_fraction = 0.9
+)
+
+# Train Model
+model <- lgb.train(
+  params = params,
+  data = lgb_train,
+  valids = list(test = lgb_test),
+  nrounds = 100,
+  early_stopping_rounds = 10
+)
+
+# Predictions
+y_pred_prob <- predict(model, as.matrix(X_test))
+y_pred <- ifelse(y_pred_prob > 0.5, 1, 0)
+
+# 1. ROC Curve
+roc_obj <- roc(y_test, y_pred_prob)
+
+# 2. Confusion Matrix Visualization
+conf_mat <- table(Actual = y_test, Predicted = y_pred)
+conf_mat_df <- as.data.frame(conf_mat)
+confusion_plot <- ggplot(conf_mat_df, aes(x = Actual, y = Predicted, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(title = "Confusion Matrix Heatmap")
+
+# 3. Feature Importance
+feature_importance <- lgb.importance(model)
+importance_plot <- feature_importance %>%
+  ggplot(aes(x = reorder(Feature, Gain), y = Gain)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Feature Importance", 
+       x = "Features", 
+       y = "Importance (Gain)") +
+  theme_minimal()
+
+# 4. Prediction Probability Distribution
+prob_dist_plot <- ggplot(data.frame(Probability = y_pred_prob), 
+                         aes(x = Probability)) +
+  geom_histogram(bins = 30, fill = "lightblue", color = "black") +
+  labs(title = "Prediction Probability Distribution",
+       x = "Predicted Probability",
+       y = "Frequency")
+
+# Create plots individually
+plot(roc_obj, main = "ROC Curve")
+print(confusion_plot)
+print(importance_plot)
+print(prob_dist_plot)
+
+# Model Evaluation Metrics
+accuracy <- sum(y_pred == y_test) / length(y_test)
+precision <- conf_mat[2,2] / sum(y_pred)
+recall <- conf_mat[2,2] / sum(y_test)
+f1_score <- 2 * (precision * recall) / (precision + recall)
+
+# Print evaluation metrics
+cat(sprintf("Accuracy: %.2f%%\n", accuracy * 100))
+cat(sprintf("Precision: %.2f%%\n", precision * 100))
+cat(sprintf("Recall: %.2f%%\n", recall * 100))
+cat(sprintf("F1 Score: %.2f%%\n", f1_score * 100))
+
+# Print top features
+print("Top 10 Important Features:")
+print(head(feature_importance, 10))
